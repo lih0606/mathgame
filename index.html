@@ -34,15 +34,23 @@
     import { createRoot } from 'react-dom/client';
     import { Trophy, Clock, Star, ArrowLeft, Delete, Play, Crown, User, AlertTriangle } from 'lucide-react';
     import { initializeApp } from 'firebase/app';
-    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+    import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
     import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, onSnapshot } from 'firebase/firestore';
 
-    // 환경 변수에서 제공되는 파이어베이스 설정 사용 (실시간 멀티플레이 데이터 공유)
-    const firebaseConfig = JSON.parse(__firebase_config);
+    // 선생님의 실제 파이어베이스 연동 키 (외부 웹 호스팅용)
+    const firebaseConfig = {
+      apiKey: "AIzaSyBNpTrVRK4K5gGwRHsHqGc_SV4ow1RUUyI",
+      authDomain: "mathgame-9928c.firebaseapp.com",
+      projectId: "mathgame-9928c",
+      storageBucket: "mathgame-9928c.firebasestorage.app",
+      messagingSenderId: "391195786650",
+      appId: "1:391195786650:web:d0581a5b0e90ef97bc8e23"
+    };
+
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getFirestore(app);
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const appId = 'mathgame-9928c'; 
 
     // 난이도 설정
     const LEVELS = [
@@ -78,11 +86,7 @@
       useEffect(() => {
         const initAuth = async () => {
           try {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-              await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-              await signInAnonymously(auth);
-            }
+            await signInAnonymously(auth);
           } catch (error) {
             console.error("Auth init error:", error);
             setIsLoading(false);
