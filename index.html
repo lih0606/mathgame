@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>사칙연산 게임</title>
+  
+  <!-- Tailwind CSS 로드 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- ES 모듈(React, Firebase 등) 주소 매핑 -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.378.0",
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
+      }
+    }
+  </script>
+  
+  <!-- JSX 변환을 위한 Babel 로드 -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+
+  <!-- 메인 앱 로직 -->
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useCallback, useMemo } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { Trophy, Clock, Star, ArrowLeft, Delete, Play, Crown, User } from 'lucide-react';
+    import { initializeApp } from 'firebase/app';
+    import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+    import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, onSnapshot } from 'firebase/firestore';
+
+    // 선생님의 실제 파이어베이스 연동 키
+    const firebaseConfig = {
+      apiKey: "AIzaSyBNpTrVRK4K5gGwRHsHqGc_SV4ow1RUUyI",
+      authDomain: "mathgame-9928c.firebaseapp.com",
+      projectId: "mathgame-9928c",
+      storageBucket: "mathgame-9928c.firebasestorage.app",
+      messagingSenderId: "391195786650",
+      appId: "1:391195786650:web:d0581a5b0e90ef97bc8e23"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const appId = 'mathgame-9928c'; 
+
+    // 난이도 설정
+    const LEVELS = [
+      { id: 1, name: '초급 (1학년)', desc: '1자리 더하기, 빼기', color: 'bg-green-400', timeLimit: 10 },
+      { id: 2, name: '중급 (2학년)', desc: '2자리 더하기, 빼기', color: 'bg-blue-400', timeLimit: 20 },
+      { id: 3, name: '고급 (3학년)', desc: '구구단과 나눗셈', color: 'bg-purple-400', timeLimit: 30 },
+      { id: 4, name: '마스터', desc: '모든 연산 섞어서', color: 'bg-red-400', timeLimit: null },
+    ];
+
+    function App() {
+      const [view, setView] = useState('login'); 
+      const [level, setLevel] = useState(1);
+      const [score, setScore] = useState(0);
+      const [question, setQuestion] = useState(null);
+      const [userAnswer, setUserAnswer] = useState('');
+      const [feedback, setFeedback] = useState(null); 
+      const [combo, setCombo] = useState(0);
+      const [timeLeft, setTimeLeft] = useState(null); 
+
+      // === 파이어베이스 및 로그인 관련 상태 ===
+      const [firebaseUser, setFirebaseUser] = useState(null);
+      const [playerProfile, setPlayerProfile] = useState(null);
+      const [playersList, setPlayersList] = useState([]); 
+      const [inputId, setInputId] = useState('');
+      const [inputPin, setInputPin] = useState('');
+      const [authError, setAuthError] = useState('');
+      const [isLoading, setIsLoading] = useState(false);
+      const [isNewRecord, setIsNewRecord] = useState(false);
+
+      // 1. 파이어베이스 인증 (자동 익명 로그인 처리)
+      useEffect(() => {
+        const initAuth = async () => {
+          try {
+            await signInAnonymously(auth);
+          } catch (error) {
+            console.error("Auth init error:", error);
+          }
+        };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, setFirebaseUser);
+        return () => unsubscribe();
+      }, []);
+
+      // 2. 전체 유저 데이터 구독 (명예의 전당 정보 실시간 갱신)
+      useEffect(() => {
+        if (!firebaseUser) return;
+        const playersRef = collection(db, 'artifacts', appId, 'public', 'data', 'players');
+        const unsubscribe = onSnapshot(playersRef, (snapshot) => {
+          const players = [];
+          snapshot.forEach((doc) => {
+            players.push({ id: doc.id, ...doc.data() });
+          });
+          setPlayersList(players);
+        }, (error) => {
+          console.error("Snapshot error:", error);
+        });
+        return () => unsubscribe();
+      }, [firebaseUser]);
+
+      // 3. 명예의 전당 계산 로직
+      const topPlayers = useMemo(() => {
+        const tops = {};
+        LEVELS.forEach(l => {
+          let highest = 0;
+          let topPlayer = null;
+          playersList.forEach(player => {
+            const s = player.scores?.[l.id] || 0;
+            if (s > highest) {
+              highest = s;
+              topPlayer = player;
+            }
+          });
+          tops[l.id] = topPlayer ? { id: topPlayer.id, score: highest } : null;
+        });
+        return tops;
+      }, [playersList]);
+
+      // 4. 로그인/가입 로직
+      const handleLogin = async () => {
+        if (!firebaseUser) return;
+        
+        const finalId = inputId.trim();
+        if (!finalId || !inputPin || inputPin.length !== 4) {
+          setAuthError('아이디(한글)와 비밀번호(숫자 4자리)를 입력해주세요.');
+          return;
+        }
+        setAuthError('');
+        setIsLoading(true);
+        
+        try {
+          const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', finalId);
+          const playerSnap = await getDoc(playerRef);
+
+          if (playerSnap.exists()) {
+            const data = playerSnap.data();
+            if (data.pin === inputPin) {
+              setPlayerProfile({ id: finalId, ...data });
+              setView('home');
+            } else {
+              setAuthError('패스워드가 틀렸습니다.'); 
+            }
+          } else {
+            const newData = {
+              pin: inputPin,
+              scores: { 1: 0, 2: 0, 3: 0, 4: 0 },
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(playerRef, newData);
+            setPlayerProfile({ id: finalId, ...newData });
+            setView('home');
+          }
+        } catch (error) {
+          console.error(error);
+          setAuthError('오류가 발생했습니다.');
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      // 5. 신기록 저장 로직
+      useEffect(() => {
+        if (view === 'result' && playerProfile) {
+          const currentHigh = playerProfile.scores?.[level] || 0;
+          if (score > currentHigh && score > 0) {
+            setIsNewRecord(true); 
+            const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', playerProfile.id);
+            updateDoc(playerRef, {
+              [`scores.${level}`]: score
+            }).then(() => {
+              setPlayerProfile(prev => ({
+                ...prev,
+                scores: { ...prev.scores, [level]: score }
+              }));
+            });
+          } else {
+            setIsNewRecord(false);
+          }
+        }
+      }, [view, level, playerProfile, score]); 
+
+      // 문제 생성
+      const generateQuestion = useCallback((currentLevel) => {
+        let a, b, op, answer;
+        const ops = [];
+        
+        if (currentLevel === 1) ops.push('+', '-');
+        else if (currentLevel === 2) ops.push('+', '-');
+        else if (currentLevel === 3) ops.push('x', '/');
+        else ops.push('+', '-', 'x', '/');
+
+        op = ops[Math.floor(Math.random() * ops.length)];
+
+        if (currentLevel === 1) {
+          if (op === '+') {
+            a = Math.floor(Math.random() * 9) + 1;
+            b = Math.floor(Math.random() * 9) + 1;
+            answer = a + b;
+          } else {
+            a = Math.floor(Math.random() * 9) + 2; 
+            b = Math.floor(Math.random() * (a - 1)) + 1; 
+            answer = a - b;
+          }
+        } else if (currentLevel === 2) {
+          if (op === '+') {
+            a = Math.floor(Math.random() * 40) + 10;
+            b = Math.floor(Math.random() * 40) + 10;
+            answer = a + b;
+          } else {
+            a = Math.floor(Math.random() * 80) + 20;
+            b = Math.floor(Math.random() * (a - 10)) + 10;
+            answer = a - b;
+          }
+        } else if (currentLevel === 3 || op === 'x' || op === '/') {
+          if (op === 'x') {
+            a = Math.floor(Math.random() * 8) + 2; 
+            b = Math.floor(Math.random() * 9) + 1;
+            answer = a * b;
+          } else {
+            b = Math.floor(Math.random() * 8) + 2;
+            answer = Math.floor(Math.random() * 9) + 1;
+            a = b * answer;
+          }
+        } else {
+          a = Math.floor(Math.random() * 90) + 10;
+          b = Math.floor(Math.random() * 90) + 10;
+          if (op === '+') answer = a + b;
+          else {
+            if (a < b) [a, b] = [b, a]; 
+            answer = a - b;
+          }
+        }
+
+        setQuestion({ a, b, op, answer });
+        setUserAnswer('');
+        setFeedback(null);
+      }, []);
+
+      // 게임 시작
+      const startGame = (selectedLevel) => {
+        setLevel(selectedLevel);
+        setScore(0);
+        setCombo(0);
+        const levelConfig = LEVELS.find(l => l.id === selectedLevel);
+        setTimeLeft(levelConfig.timeLimit); 
+        generateQuestion(selectedLevel);
+        setView('game');
+      };
+
+      // 타이머 효과
+      useEffect(() => {
+        if (view !== 'game' || timeLeft === null || feedback !== null) return;
+
+        if (timeLeft > 0) {
+          const timerId = setInterval(() => {
+            setTimeLeft((prev) => prev - 1);
+          }, 1000);
+          return () => clearInterval(timerId);
+        } else if (timeLeft === 0) {
+          setCombo(0);
+          setFeedback('wrong');
+          setTimeout(() => {
+            setFeedback(null);
+            setView('result');
+          }, 600);
+        }
+      }, [view, timeLeft, feedback]);
+
+      const handleInput = (num) => {
+        if (userAnswer.length < 4) {
+          setUserAnswer((prev) => prev + num);
+        }
+      };
+
+      const handleDelete = () => {
+        setUserAnswer((prev) => prev.slice(0, -1));
+      };
+
+      const handleSubmit = () => {
+        if (!userAnswer || feedback !== null) return;
+
+        if (parseInt(userAnswer) === question.answer) {
+          const points = 10 + (combo * 2);
+          setScore((prev) => prev + points);
+          setCombo((prev) => prev + 1);
+          setFeedback('correct');
+          setTimeout(() => {
+            generateQuestion(level);
+            setTimeLeft(LEVELS.find(l => l.id === level).timeLimit); 
+          }, 500);
+        } else {
+          setCombo(0);
+          setFeedback('wrong');
+          setTimeout(() => {
+            setFeedback(null);
+            setView('result');
+          }, 600); 
+        }
+      };
+
+      // PC 키보드 입력 지원
+      useEffect(() => {
+        if (view !== 'game') return;
+
+        const handleKeyDown = (e) => {
+          if (/^[0-9]$/.test(e.key)) {
+            handleInput(e.key); 
+          } else if (e.key === 'Backspace') {
+            handleDelete(); 
+          } else if (e.key === 'Enter') {
+            handleSubmit(); 
+          }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+      }, [view, userAnswer, question, combo, level, score, feedback]);
+
+      // === 로그인 뷰 ===
+      const renderLoginView = () => (
+        <div className="flex flex-col h-full p-6 space-y-5 animate-in fade-in duration-500 overflow-y-auto">
+          <div className="mt-2 mb-2 space-y-4">
+            <div className="flex items-center justify-center space-x-4">
+              <svg width="76" height="76" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+                <rect x="10" y="10" width="45" height="45" rx="12" fill="#FCA5A5"/>
+                <path d="M32.5 20v25M20 32.5h25" stroke="white" strokeWidth="6" strokeLinecap="round"/>
+                <rect x="65" y="10" width="45" height="45" rx="12" fill="#93C5FD"/>
+                <path d="M75 32.5h25" stroke="white" strokeWidth="6" strokeLinecap="round"/>
+                <rect x="10" y="65" width="45" height="45" rx="12" fill="#FDE047"/>
+                <path d="M22.5 77.5l20 20M42.5 77.5l-20 20" stroke="white" strokeWidth="6" strokeLinecap="round"/>
+                <rect x="65" y="65" width="45" height="45" rx="12" fill="#86EFAC"/>
+                <path d="M75 87.5h25" stroke="white" strokeWidth="6" strokeLinecap="round"/>
+                <circle cx="87.5" cy="76" r="3.5" fill="white"/>
+                <circle cx="87.5" cy="99" r="3.5" fill="white"/>
+              </svg>
+              <h1 className="text-[34px] font-extrabold text-indigo-900 leading-[38px] text-left tracking-tight">
+                사칙<br />연산
+              </h1>
+            </div>
+            <p className="text-indigo-600 text-sm text-center font-medium">처음이라면 자동으로 가입돼요!</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-3xl shadow-sm space-y-4 border border-indigo-50">
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-1">아이디 (한글 최대 4글자)</label>
+              <input
+                type="text"
+                value={inputId}
+                maxLength={4}
+                onChange={(e) => {
+                  const onlyKorean = e.target.value.replace(/[^가-힣ㄱ-ㅎㅏ-ㅣ]/g, '').slice(0, 4);
+                  setInputId(onlyKorean);
+                }}
+                className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl px-4 py-3 font-bold text-lg focus:outline-none focus:border-indigo-400 transition-colors"
+                placeholder="예: 덧셈왕자"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-1">비밀번호 (숫자 4자리)</label>
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                value={inputPin}
+                onChange={(e) => setInputPin(e.target.value.replace(/[^0-9]/g, ''))}
+                className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl px-4 py-3 font-bold text-lg focus:outline-none focus:border-indigo-400 transition-colors tracking-[0.5em]"
+                placeholder="0000"
+              />
+            </div>
+            {authError && <p className="text-red-500 text-sm font-bold text-center">{authError}</p>}
+            <button
+              onClick={handleLogin}
+              disabled={isLoading || !firebaseUser}
+              className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-lg py-4 rounded-xl shadow-md active:scale-95 transition-all disabled:opacity-50"
+            >
+              {isLoading ? '로딩 중...' : (!firebaseUser ? '서버 연결 중...' : '시작하기')}
+            </button>
+          </div>
+
+          <div className="flex-1 bg-gradient-to-b from-amber-100 to-amber-50 rounded-3xl p-5 shadow-sm border border-amber-200 mb-4">
+            <div className="flex items-center justify-center space-x-2 mb-4">
+              <Crown className="text-amber-500" size={24} />
+              <h2 className="text-xl font-extrabold text-amber-700">명예의 전당</h2>
+            </div>
+            <div className="space-y-3">
+              {LEVELS.map(l => {
+                const top = topPlayers[l.id];
+                return (
+                  <div key={l.id} className="flex items-center justify-between bg-white/80 p-3 rounded-xl shadow-sm">
+                    <div className="flex items-center space-x-2">
+                      <span className={`text-xs font-bold text-white px-2 py-1 rounded-md ${l.color}`}>
+                        {l.name.split(' ')[0]}
+                      </span>
+                      <span className="font-bold text-gray-700 truncate max-w-[110px]">{top ? top.id : '-'}</span>
+                    </div>
+                    <div className="font-black text-indigo-900">
+                      {top ? `${top.score}점` : '기록 없음'}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+
+      // === 홈 뷰 ===
+      const renderHomeView = () => (
+        <div className="flex flex-col h-full p-6 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-indigo-50">
+            <div className="flex items-center space-x-3">
+              <div className="bg-indigo-100 p-2 rounded-full">
+                <User size={20} className="text-indigo-600" />
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 font-bold">환영합니다!</p>
+                <p className="font-black text-indigo-900">{playerProfile?.id} 님</p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setPlayerProfile(null);
+                setView('login');
+                setInputPin('');
+              }}
+              className="text-xs font-bold text-gray-500 hover:text-indigo-500 bg-gray-50 hover:bg-indigo-50 px-3 py-2 rounded-lg transition-colors"
+            >
+              로그아웃
+            </button>
+          </div>
+
+          <div className="text-center space-y-2">
+            <h1 className="text-2xl font-extrabold text-indigo-900 tracking-tight">도전할 난이도 선택</h1>
+          </div>
+
+          <div className="w-full space-y-3 flex-1 overflow-y-auto pb-4">
+            {LEVELS.map((l) => (
+              <button
+                key={l.id}
+                onClick={() => startGame(l.id)}
+                className={`${l.color} w-full p-4 rounded-2xl shadow-sm transform transition active:scale-95 flex items-center justify-between text-white border-b-4 border-black/10`}
+              >
+                <div className="text-left">
+                  <h3 className="font-bold text-lg">{l.name}</h3>
+                  <p className="text-white/90 text-sm font-medium mb-1">{l.desc}</p>
+                  <p className="text-white/80 text-xs font-bold bg-black/10 inline-block px-2 py-1 rounded-md">
+                    내 최고점: {playerProfile?.scores?.[l.id] || 0}점
+                  </p>
+                </div>
+                <Play fill="currentColor" size={24} className="opacity-80" />
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+
+      // === 게임 뷰 ===
+      const renderGameView = () => (
+        <div className="flex flex-col h-full p-4 animate-in fade-in duration-300">
+          <div className="flex justify-between items-center mb-6 bg-white p-4 rounded-2xl shadow-sm">
+            <div className="flex items-center space-x-2 text-indigo-500 font-bold">
+              <Star size={20} />
+              <span className="text-xl">
+                {LEVELS.find(l => l.id === level)?.name.split(' ')[0]}
+              </span>
+            </div>
+            
+            <div className={`flex items-center space-x-1.5 font-bold ${timeLeft !== null && timeLeft <= 3 ? 'text-red-500 animate-pulse' : 'text-slate-500'}`}>
+              <Clock size={20} />
+              <span className="text-xl">
+                {timeLeft === null ? '무제한' : `${timeLeft}초`}
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-2 text-amber-500 font-bold">
+              <Trophy size={20} />
+              <span className="text-xl">{score}점</span>
+            </div>
+          </div>
+
+          <div className="h-6 text-center mb-2">
+            {combo >= 2 && (
+              <span className="text-orange-500 font-bold animate-bounce inline-block">
+                {combo} 연속 정답! 🔥
+              </span>
+            )}
+          </div>
+
+          <div className="flex-1 flex flex-col items-center justify-center space-y-8 mb-4">
+            {question && (
+              <div className="text-6xl font-black text-indigo-900 tracking-wider">
+                {question.a} {question.op === 'x' ? '×' : question.op === '/' ? '÷' : question.op} {question.b}
+              </div>
+            )}
+            
+            <div className={`w-full max-w-[240px] h-20 bg-white rounded-2xl shadow-inner border-4 flex items-center justify-center text-4xl font-bold transition-colors duration-200
+              ${feedback === 'correct' ? 'border-green-400 text-green-500 bg-green-50' : 
+                feedback === 'wrong' ? 'border-red-400 text-red-500 bg-red-50' : 
+                'border-indigo-100 text-indigo-900'}
+            `}>
+              {userAnswer || <span className="text-gray-300">?</span>}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 mt-auto pb-4">
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+              <button
+                key={num}
+                onClick={() => handleInput(num.toString())}
+                className="bg-white hover:bg-indigo-50 active:bg-indigo-100 text-indigo-900 text-2xl font-bold py-5 rounded-2xl shadow-sm border-b-4 border-gray-200 active:border-b-0 active:translate-y-1 transition-all"
+              >
+                {num}
+              </button>
+            ))}
+            <button
+              onClick={handleDelete}
+              className="bg-gray-100 hover:bg-gray-200 active:bg-gray-300 text-gray-600 flex justify-center items-center py-5 rounded-2xl shadow-sm border-b-4 border-gray-200 active:border-b-0 active:translate-y-1 transition-all"
+            >
+              <Delete size={28} />
+            </button>
+            <button
+              onClick={() => handleInput('0')}
+              className="bg-white hover:bg-indigo-50 active:bg-indigo-100 text-indigo-900 text-2xl font-bold py-5 rounded-2xl shadow-sm border-b-4 border-gray-200 active:border-b-0 active:translate-y-1 transition-all"
+            >
+              0
+            </button>
+            <button
+              onClick={handleSubmit}
+              className="bg-indigo-500 hover:bg-indigo-600 active:bg-indigo-700 text-white text-xl font-bold py-5 rounded-2xl shadow-sm border-b-4 border-indigo-700 active:border-b-0 active:translate-y-1 transition-all"
+            >
+              확인
+            </button>
+          </div>
+        </div>
+      );
+
+      // === 결과 뷰 ===
+      const renderResultView = () => (
+        <div className="flex flex-col items-center justify-center h-full p-6 space-y-8 animate-in zoom-in-95 duration-500">
+          <div className="text-center space-y-2">
+            <div className="text-6xl mb-4">🎉</div>
+            <h2 className="text-3xl font-extrabold text-indigo-900">게임 종료!</h2>
+            {isNewRecord ? (
+              <p className="text-green-500 font-bold animate-bounce mt-2">최고 기록 달성! 대단해요!</p>
+            ) : (
+              <p className="text-indigo-600 font-medium">참 잘했어요!</p>
+            )}
+          </div>
+
+          <div className="bg-white w-full p-8 rounded-3xl shadow-sm text-center space-y-4 border-2 border-indigo-50 relative overflow-hidden">
+             {isNewRecord && (
+              <div className="absolute top-0 left-0 w-full bg-green-500 text-white text-xs font-bold py-1">
+                NEW HIGH SCORE
+              </div>
+            )}
+            <p className="text-gray-500 font-medium mt-2">최종 점수</p>
+            <div className="text-6xl font-black text-amber-500 flex items-center justify-center space-x-2">
+              <Star size={40} className="fill-amber-500" />
+              <span>{score}</span>
+            </div>
+             <p className="text-sm font-bold text-gray-400">
+              이전 내 최고점: {playerProfile?.scores?.[level] || 0}점
+            </p>
+          </div>
+
+          <button
+            onClick={() => setView('home')}
+            className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-lg p-5 rounded-2xl shadow-lg shadow-indigo-200 flex items-center justify-center space-x-2 active:scale-95 transition-transform"
+          >
+            <ArrowLeft size={24} />
+            <span>처음으로 돌아가기</span>
+          </button>
+        </div>
+      );
+
+      return (
+        <div className="min-h-[100dvh] bg-slate-100 flex items-center justify-center font-sans selection:bg-none">
+          <div className="w-full max-w-md h-[100dvh] sm:h-[850px] sm:max-h-[100dvh] bg-indigo-50/50 sm:rounded-[2.5rem] sm:shadow-2xl overflow-hidden relative border-x sm:border-y border-indigo-100">
+            {view === 'login' && renderLoginView()}
+            {view === 'home' && renderHomeView()}
+            {view === 'game' && renderGameView()}
+            {view === 'result' && renderResultView()}
+          </div>
+        </div>
+      );
+    }
+
+    // 앱 실행
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
