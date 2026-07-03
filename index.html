@@ -30,27 +30,19 @@
 
   <!-- 메인 앱 로직 -->
   <script type="text/babel" data-type="module">
-    import React, { useState, useEffect, useCallback, useMemo } from 'react';
+    import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
     import { createRoot } from 'react-dom/client';
     import { Trophy, Clock, Star, ArrowLeft, Delete, Play, Crown, User, AlertTriangle } from 'lucide-react';
     import { initializeApp } from 'firebase/app';
-    import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
     import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, onSnapshot } from 'firebase/firestore';
 
-    // 선생님의 실제 파이어베이스 연동 키
-    const firebaseConfig = {
-      apiKey: "AIzaSyBNpTrVRK4K5gGwRHsHqGc_SV4ow1RUUyI",
-      authDomain: "mathgame-9928c.firebaseapp.com",
-      projectId: "mathgame-9928c",
-      storageBucket: "mathgame-9928c.firebasestorage.app",
-      messagingSenderId: "391195786650",
-      appId: "1:391195786650:web:d0581a5b0e90ef97bc8e23"
-    };
-
+    // 환경 변수에서 제공되는 파이어베이스 설정 사용 (실시간 멀티플레이 데이터 공유)
+    const firebaseConfig = JSON.parse(__firebase_config);
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getFirestore(app);
-    const appId = 'mathgame-9928c'; 
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
     // 난이도 설정
     const LEVELS = [
@@ -74,38 +66,71 @@
       const [firebaseUser, setFirebaseUser] = useState(null);
       const [playerProfile, setPlayerProfile] = useState(null);
       const [playersList, setPlayersList] = useState([]); 
-      const [inputId, setInputId] = useState('');
-      const [inputPin, setInputPin] = useState('');
+      const [nicknameInput, setNicknameInput] = useState(''); // 개선: PIN 번호 제거, 닉네임만 사용
       const [authError, setAuthError] = useState('');
-      const [isLoading, setIsLoading] = useState(false);
+      const [isLoading, setIsLoading] = useState(true); // 초기 로딩 상태 처리
       const [isNewRecord, setIsNewRecord] = useState(false);
       
-      // 권한 오류(Rules)를 감지하는 상태 추가
       const [dbPermissionError, setDbPermissionError] = useState(false);
 
-      // 1. 파이어베이스 인증 (자동 익명 로그인 처리)
+      // 1. 파이어베이스 인증 (자동 인증 처리)
       useEffect(() => {
         const initAuth = async () => {
           try {
-            await signInAnonymously(auth);
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
           } catch (error) {
             console.error("Auth init error:", error);
+            setIsLoading(false);
           }
         };
         initAuth();
-        const unsubscribe = onAuthStateChanged(auth, setFirebaseUser);
+        const unsubscribe = onAuthStateChanged(auth, (user) => {
+          setFirebaseUser(user);
+          if (!user) setIsLoading(false);
+        });
         return () => unsubscribe();
       }, []);
+
+      // 개선: 1-1. 자동 로그인 로직 (기기 기반)
+      useEffect(() => {
+        if (!firebaseUser) return;
+        
+        const checkExistingUser = async () => {
+          try {
+            const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', firebaseUser.uid);
+            const playerSnap = await getDoc(playerRef);
+            
+            if (playerSnap.exists()) {
+              setPlayerProfile({ uid: firebaseUser.uid, ...playerSnap.data() });
+              setView('home');
+            }
+          } catch (error) {
+            if (error.code === 'permission-denied' || error.message.includes('permissions')) {
+              setDbPermissionError(true);
+            }
+          } finally {
+            setIsLoading(false);
+          }
+        };
+
+        if (view === 'login' && !playerProfile) {
+          checkExistingUser();
+        }
+      }, [firebaseUser, view, playerProfile]);
 
       // 2. 전체 유저 데이터 구독 (명예의 전당 정보 실시간 갱신)
       useEffect(() => {
         if (!firebaseUser) return;
         const playersRef = collection(db, 'artifacts', appId, 'public', 'data', 'players');
         const unsubscribe = onSnapshot(playersRef, (snapshot) => {
-          setDbPermissionError(false); // 성공하면 에러 해제
+          setDbPermissionError(false); 
           const players = [];
           snapshot.forEach((doc) => {
-            players.push({ id: doc.id, ...doc.data() });
+            players.push({ uid: doc.id, ...doc.data() });
           });
           setPlayersList(players);
         }, (error) => {
@@ -117,7 +142,7 @@
         return () => unsubscribe();
       }, [firebaseUser]);
 
-      // 3. 명예의 전당 계산 로직
+      // 3. 명예의 전당 계산 로직 (개선: 닉네임 표시)
       const topPlayers = useMemo(() => {
         const tops = {};
         LEVELS.forEach(l => {
@@ -130,45 +155,34 @@
               topPlayer = player;
             }
           });
-          tops[l.id] = topPlayer ? { id: topPlayer.id, score: highest } : null;
+          tops[l.id] = topPlayer ? { nickname: topPlayer.nickname, score: highest } : null;
         });
         return tops;
       }, [playersList]);
 
-      // 4. 로그인/가입 로직
-      const handleLogin = async () => {
+      // 4. 개선된 회원가입 (프로필 생성) 로직
+      const handleSignup = async () => {
         if (!firebaseUser) return;
         
-        const finalId = inputId.trim();
-        if (!finalId || !inputPin || inputPin.length !== 4) {
-          setAuthError('아이디(한글)와 비밀번호(숫자 4자리)를 입력해주세요.');
+        const finalNickname = nicknameInput.trim();
+        if (!finalNickname) {
+          setAuthError('멋진 닉네임을 입력해주세요!');
           return;
         }
+        
         setAuthError('');
         setIsLoading(true);
         
         try {
-          const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', finalId);
-          const playerSnap = await getDoc(playerRef);
-
-          if (playerSnap.exists()) {
-            const data = playerSnap.data();
-            if (data.pin === inputPin) {
-              setPlayerProfile({ id: finalId, ...data });
-              setView('home');
-            } else {
-              setAuthError('패스워드가 틀렸습니다.'); 
-            }
-          } else {
-            const newData = {
-              pin: inputPin,
-              scores: { 1: 0, 2: 0, 3: 0, 4: 0 },
-              createdAt: new Date().toISOString()
-            };
-            await setDoc(playerRef, newData);
-            setPlayerProfile({ id: finalId, ...newData });
-            setView('home');
-          }
+          const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', firebaseUser.uid);
+          const newData = {
+            nickname: finalNickname,
+            scores: { 1: 0, 2: 0, 3: 0, 4: 0 },
+            createdAt: new Date().toISOString()
+          };
+          await setDoc(playerRef, newData);
+          setPlayerProfile({ uid: firebaseUser.uid, ...newData });
+          setView('home');
         } catch (error) {
           console.error(error);
           if (error.code === 'permission-denied' || error.message.includes('permissions')) {
@@ -187,7 +201,7 @@
           const currentHigh = playerProfile.scores?.[level] || 0;
           if (score > currentHigh && score > 0) {
             setIsNewRecord(true); 
-            const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', playerProfile.id);
+            const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', playerProfile.uid);
             updateDoc(playerRef, {
               [`scores.${level}`]: score
             }).then(() => {
@@ -291,15 +305,14 @@
         }
       }, [view, timeLeft, feedback]);
 
-      const handleInput = (num) => {
-        if (userAnswer.length < 4) {
-          setUserAnswer((prev) => prev + num);
-        }
-      };
+      // 입력 처리 최적화 (useCallback 및 함수형 업데이트)
+      const handleInput = useCallback((num) => {
+        setUserAnswer((prev) => prev.length < 4 ? prev + num : prev);
+      }, []);
 
-      const handleDelete = () => {
+      const handleDelete = useCallback(() => {
         setUserAnswer((prev) => prev.slice(0, -1));
-      };
+      }, []);
 
       const handleSubmit = () => {
         if (!userAnswer || feedback !== null) return;
@@ -323,7 +336,12 @@
         }
       };
 
-      // PC 키보드 입력 지원
+      // 개선: PC 키보드 입력 최적화 (불필요한 리스너 재등록 방지)
+      const handleSubmitRef = useRef(handleSubmit);
+      useEffect(() => {
+        handleSubmitRef.current = handleSubmit;
+      }, [handleSubmit]);
+
       useEffect(() => {
         if (view !== 'game') return;
 
@@ -333,15 +351,15 @@
           } else if (e.key === 'Backspace') {
             handleDelete(); 
           } else if (e.key === 'Enter') {
-            handleSubmit(); 
+            handleSubmitRef.current(); 
           }
         };
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-      }, [view, userAnswer, question, combo, level, score, feedback]);
+      }, [view, handleInput, handleDelete]); // 의존성 대폭 축소
 
-      // === 권한 에러 안내 뷰 (새로 추가됨) ===
+      // === 권한 에러 안내 뷰 (개선: 보안 규칙 문자열 변경됨) ===
       if (dbPermissionError) {
         return (
           <div className="min-h-[100dvh] bg-slate-100 flex items-center justify-center font-sans p-4">
@@ -365,7 +383,7 @@
               <textarea 
                 readOnly
                 className="w-full bg-slate-800 text-green-400 font-mono text-xs p-4 rounded-xl h-40 focus:outline-none"
-                value={`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`}
+                value={`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      // 개선됨: 로그인한(익명 포함) 사용자만 데이터 수정 가능\n      allow read, write: if request.auth != null;\n    }\n  }\n}`}
               />
               <button 
                 onClick={() => window.location.reload()}
@@ -378,7 +396,7 @@
         );
       }
 
-      // === 로그인 뷰 ===
+      // === 로그인 뷰 (개선: 닉네임만 입력받아 익명 UID와 연결) ===
       const renderLoginView = () => (
         <div className="flex flex-col h-full p-6 space-y-5 animate-in fade-in duration-500 overflow-y-auto">
           <div className="mt-2 mb-2 space-y-4">
@@ -399,44 +417,37 @@
                 사칙<br />연산
               </h1>
             </div>
-            <p className="text-indigo-600 text-sm text-center font-medium">처음이라면 자동으로 가입돼요!</p>
+            <p className="text-indigo-600 text-sm text-center font-medium">별명 하나만 정하면 끝!</p>
           </div>
 
           <div className="bg-white p-5 rounded-3xl shadow-sm space-y-4 border border-indigo-50">
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">아이디 (한글 최대 4글자)</label>
-              <input
-                type="text"
-                value={inputId}
-                maxLength={4}
-                onChange={(e) => {
-                  const onlyKorean = e.target.value.replace(/[^가-힣ㄱ-ㅎㅏ-ㅣ]/g, '').slice(0, 4);
-                  setInputId(onlyKorean);
-                }}
-                className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl px-4 py-3 font-bold text-lg focus:outline-none focus:border-indigo-400 transition-colors"
-                placeholder="예: 덧셈왕자"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">비밀번호 (숫자 4자리)</label>
-              <input
-                type="password"
-                inputMode="numeric"
-                maxLength={4}
-                value={inputPin}
-                onChange={(e) => setInputPin(e.target.value.replace(/[^0-9]/g, ''))}
-                className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl px-4 py-3 font-bold text-lg focus:outline-none focus:border-indigo-400 transition-colors tracking-[0.5em]"
-                placeholder="0000"
-              />
-            </div>
-            {authError && <p className="text-red-500 text-sm font-bold text-center break-keep">{authError}</p>}
-            <button
-              onClick={handleLogin}
-              disabled={isLoading || !firebaseUser}
-              className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-lg py-4 rounded-xl shadow-md active:scale-95 transition-all disabled:opacity-50"
-            >
-              {isLoading ? '로딩 중...' : (!firebaseUser ? '서버 연결 중...' : '시작하기')}
-            </button>
+            {isLoading ? (
+              <div className="py-8 text-center text-indigo-500 font-bold animate-pulse">
+                데이터를 불러오고 있습니다...
+              </div>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">사용할 별명 (최대 6글자)</label>
+                  <input
+                    type="text"
+                    value={nicknameInput}
+                    maxLength={6}
+                    onChange={(e) => setNicknameInput(e.target.value)}
+                    className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl px-4 py-3 font-bold text-lg focus:outline-none focus:border-indigo-400 transition-colors"
+                    placeholder="예: 덧셈왕자"
+                  />
+                </div>
+                {authError && <p className="text-red-500 text-sm font-bold text-center break-keep">{authError}</p>}
+                <button
+                  onClick={handleSignup}
+                  disabled={!firebaseUser}
+                  className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-lg py-4 rounded-xl shadow-md active:scale-95 transition-all disabled:opacity-50"
+                >
+                  시작하기
+                </button>
+              </>
+            )}
           </div>
 
           <div className="flex-1 bg-gradient-to-b from-amber-100 to-amber-50 rounded-3xl p-5 shadow-sm border border-amber-200 mb-4">
@@ -453,7 +464,7 @@
                       <span className={`text-xs font-bold text-white px-2 py-1 rounded-md ${l.color}`}>
                         {l.name.split(' ')[0]}
                       </span>
-                      <span className="font-bold text-gray-700 truncate max-w-[110px]">{top ? top.id : '-'}</span>
+                      <span className="font-bold text-gray-700 truncate max-w-[110px]">{top ? top.nickname : '-'}</span>
                     </div>
                     <div className="font-black text-indigo-900">
                       {top ? `${top.score}점` : '기록 없음'}
@@ -476,18 +487,17 @@
               </div>
               <div>
                 <p className="text-xs text-gray-500 font-bold">환영합니다!</p>
-                <p className="font-black text-indigo-900">{playerProfile?.id} 님</p>
+                <p className="font-black text-indigo-900">{playerProfile?.nickname} 님</p>
               </div>
             </div>
             <button
               onClick={() => {
                 setPlayerProfile(null);
                 setView('login');
-                setInputPin('');
               }}
               className="text-xs font-bold text-gray-500 hover:text-indigo-500 bg-gray-50 hover:bg-indigo-50 px-3 py-2 rounded-lg transition-colors"
             >
-              로그아웃
+              내 정보 지우기
             </button>
           </div>
 
